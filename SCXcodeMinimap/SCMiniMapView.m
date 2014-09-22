@@ -14,7 +14,7 @@ static const CGFloat kDefaultShadowLevel = 0.1f;
 
 static NSString * const DVTFontAndColorSourceTextSettingsChangedNotification = @"DVTFontAndColorSourceTextSettingsChangedNotification";
 
-@interface SCMiniMapView ()
+@interface SCMiniMapView () <NSLayoutManagerDelegate>
 
 @property (nonatomic, strong) NSColor *backgroundColor;
 @property (nonatomic, strong) NSFont *font;
@@ -22,6 +22,12 @@ static NSString * const DVTFontAndColorSourceTextSettingsChangedNotification = @
 @end
 
 @implementation SCMiniMapView
+@synthesize backgroundColor = _backgroundColor;
+
+- (void)dealloc
+{
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
 
 - (id)initWithFrame:(NSRect)frame
 {
@@ -53,22 +59,16 @@ static NSString * const DVTFontAndColorSourceTextSettingsChangedNotification = @
     return self;
 }
 
-- (void)dealloc
-{
-    [[NSNotificationCenter defaultCenter] removeObserver:self];
-}
-
 #pragma mark - Lazy Initialization
 
 - (NSTextView *)textView
 {
     if (_textView == nil) {
-        _textView = [[NSTextView alloc] initWithFrame:self.bounds];
+        _textView = [[NSClassFromString(@"DVTSourceTextView") alloc] initWithFrame:self.bounds];
+        
         [_textView setBackgroundColor:[NSColor clearColor]];
         
         [_textView.textContainer setLineFragmentPadding:0.0f];
-        
-        [_textView.layoutManager setDelegate:self];
         
         [_textView setAllowsUndo:NO];
         [_textView setAllowsImageEditing:NO];
@@ -87,7 +87,11 @@ static NSString * const DVTFontAndColorSourceTextSettingsChangedNotification = @
         [self setDocumentView:_textView];
         
         [self updateTheme];
+        
+        [[NSNotificationCenter defaultCenter] removeObserver:_textView name:DVTFontAndColorSourceTextSettingsChangedNotification object:nil];
     }
+    
+    [_textView.layoutManager setDelegate:self];
     
     return _textView;
 }
@@ -186,21 +190,21 @@ static NSString * const DVTFontAndColorSourceTextSettingsChangedNotification = @
     if(mutableAttributedString.length == 0) {
         return;
     }
-	
+    
     __block NSMutableParagraphStyle *style;
-
-	[mutableAttributedString enumerateAttribute:NSParagraphStyleAttributeName
-										inRange:NSMakeRange(0, mutableAttributedString.length)
-										options:0
-									 usingBlock:^(id value, NSRange range, BOOL *stop) {
+    
+    [mutableAttributedString enumerateAttribute:NSParagraphStyleAttributeName
+                                        inRange:NSMakeRange(0, mutableAttributedString.length)
+                                        options:0
+                                     usingBlock:^(id value, NSRange range, BOOL *stop) {
                                          style = [value mutableCopy];
                                          *stop = YES;
                                      }];
     
     
     [style setTabStops:@[]];
-	[style setDefaultTabInterval:style.defaultTabInterval * kDefaultZoomLevel];
-
+    [style setDefaultTabInterval:style.defaultTabInterval * kDefaultZoomLevel];
+    
     [mutableAttributedString setAttributes:@{NSFontAttributeName: self.font, NSParagraphStyleAttributeName : style} range:NSMakeRange(0, mutableAttributedString.length)];
     
     [self.textView.textStorage setAttributedString:mutableAttributedString];
@@ -238,30 +242,25 @@ static NSString * const DVTFontAndColorSourceTextSettingsChangedNotification = @
         selectionViewFrame.origin.y = self.editorScrollView.contentView.bounds.origin.y * ratio;
     }
     
-	[self.selectionView setFrame:selectionViewFrame];
+    [self.selectionView setFrame:selectionViewFrame];
 }
 
 #pragma mark - NSLayoutManagerDelegate
 
 - (void)layoutManager:(NSLayoutManager *)layoutManager didCompleteLayoutForTextContainer:(NSTextContainer *)textContainer atEnd:(BOOL)layoutFinished
 {
-    if([layoutManager isEqual:self.editorTextView.layoutManager]) {
-        [(id<NSLayoutManagerDelegate>)self.editorTextView layoutManager:layoutManager
-                                      didCompleteLayoutForTextContainer:textContainer
-                                                                  atEnd:layoutFinished];
-    }
-    else if(layoutFinished) {
+    if(layoutFinished) {
         [self updateSelectionView];
     }
 }
 
 - (NSDictionary *)layoutManager:(NSLayoutManager *)layoutManager shouldUseTemporaryAttributes:(NSDictionary *)attrs forDrawingToScreen:(BOOL)toScreen atCharacterIndex:(NSUInteger)charIndex effectiveRange:(NSRangePointer)effectiveCharRange
 {
-    return [(id<NSLayoutManagerDelegate>)self.editorTextView layoutManager:layoutManager
-                                              shouldUseTemporaryAttributes:attrs
-                                                        forDrawingToScreen:toScreen
-                                                          atCharacterIndex:charIndex
-                                                            effectiveRange:effectiveCharRange];
+    return [self.editorTextView.layoutManager.delegate layoutManager:layoutManager
+                                        shouldUseTemporaryAttributes:attrs
+                                                  forDrawingToScreen:toScreen
+                                                    atCharacterIndex:charIndex
+                                                      effectiveRange:effectiveCharRange];
 }
 
 #pragma mark - Navigation
@@ -286,8 +285,13 @@ static NSString * const DVTFontAndColorSourceTextSettingsChangedNotification = @
 
 - (void) handleMouseEvent:(NSEvent *)theEvent
 {
-    NSPoint locationInSelf = [self convertPoint:theEvent.locationInWindow fromView:nil];
+    static BOOL isDragging;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        isDragging = NO;
+    });
     
+    NSPoint locationInSelf = [self convertPoint:theEvent.locationInWindow fromView:nil];
     NSSize textSize = [self.textView.layoutManager usedRectForTextContainer:self.textView.textContainer].size;
     NSSize frameSize = self.frame.size;
     
@@ -299,17 +303,43 @@ static NSString * const DVTFontAndColorSourceTextSettingsChangedNotification = @
         point = NSMakePoint(locationInSelf.x / textSize.width, locationInSelf.y / frameSize.height);
     }
     
-    [self goAtRelativePosition:point];
+    BOOL justStartDragging = NO;
+    if (theEvent.type == NSLeftMouseUp) {
+        isDragging = NO;
+    }
+    else {
+        justStartDragging = !isDragging;
+        isDragging = YES;
+    }
+    
+    [self goAtRelativePosition:point justStartDragging:justStartDragging];
 }
 
-- (void)goAtRelativePosition:(NSPoint)position
+- (void)goAtRelativePosition:(NSPoint)position justStartDragging:(BOOL)justStartDragging
 {
+    static CGFloat mouseDownOffset;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        mouseDownOffset = 0;
+    });
+    
     CGFloat documentHeight = [self.editorScrollView.documentView frame].size.height;
     CGSize boundsSize = self.editorScrollView.bounds.size;
     CGFloat maxOffset = documentHeight - boundsSize.height;
+    CGFloat locationInDocumentY = documentHeight * position.y;
     
-    CGFloat offset =  floor(documentHeight * position.y - boundsSize.height/2);
+    if (justStartDragging) {
+        mouseDownOffset = locationInDocumentY -
+        (self.editorScrollView.contentView.documentVisibleRect.origin.y + boundsSize.height/2.0);
+    }
     
+    CGFloat offset;
+    if (fabs(mouseDownOffset) <= boundsSize.height/2.0) {
+        offset = floor(locationInDocumentY - boundsSize.height/2 - mouseDownOffset);
+    }
+    else {
+        offset = floor(locationInDocumentY - boundsSize.height/2);
+    }
     offset = MIN(MAX(0, offset), maxOffset);
     
     [self.editorTextView scrollRectToVisible:NSMakeRect(0, offset, boundsSize.width, boundsSize.height)];
