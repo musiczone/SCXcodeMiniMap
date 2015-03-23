@@ -6,166 +6,348 @@
 //  Copyright (c) 2013 Stefan Ceriu. All rights reserved
 //
 
-#import "SCMiniMapView.h"
 #import "SCXcodeMinimap.h"
-#import <objc/runtime.h>
+#import "SCXcodeMinimapView.h"
 
-static char kKeyMiniMapView;
+#import "IDESourceCodeEditor.h"
+#import "DVTSourceTextView.h"
 
-static NSString * const IDESourceCodeEditorDidFinishSetupNotification = @"IDESourceCodeEditorDidFinishSetup";
-static NSString * const IDEEditorDocumentDidChangeNotification = @"IDEEditorDocumentDidChangeNotification";
-static NSString * const IDESourceCodeEditorTextViewBoundsDidChangeNotification = @"IDESourceCodeEditorTextViewBoundsDidChangeNotification";
+#import "DVTPreferenceSetManager.h"
+#import "DVTFontAndColorTheme.h"
 
-NSString * const SCXodeMinimapWantsToBeShownNotification = @"SCXodeMinimapWantsToBeShownNotification";
-NSString * const SCXodeMinimapWantsToBeHiddenNotification = @"SCXodeMinimapWantsToBeHiddenNotification";
+NSString *const IDESourceCodeEditorDidFinishSetupNotification = @"IDESourceCodeEditorDidFinishSetup";
 
-NSString * const SCXodeMinimapIsInitiallyHidden  = @"SCXodeMinimapIsInitiallyHidden";
+NSString *const SCXcodeMinimapShouldDisplayChangeNotification = @"SCXcodeMinimapShouldDisplayChangeNotification";
+NSString *const SCXcodeMinimapShouldDisplayKey = @"SCXcodeMinimapShouldDisplayKey";
 
-static const CGFloat kDefaultUpdateInterval = 0.25f;
+NSString *const SCXcodeMinimapZoomLevelChangeNotification = @"SCXcodeMinimapZoomLevelChangeNotification";
+NSString *const SCXcodeMinimapZoomLevelKey = @"SCXcodeMinimapZoomLevelKey";
+
+NSString *const SCXcodeMinimapHighlightBreakpointsChangeNotification = @"SCXcodeMinimapHighlightBreakpointsChangeNotification";
+NSString *const SCXcodeMinimapShouldHighlightBreakpointsKey = @"SCXcodeMinimapShouldHighlightBreakpointsKey";
+
+NSString *const SCXcodeMinimapHighlightCommentsChangeNotification = @"SCXcodeMinimapHighlightCommentsChangeNotification";
+NSString *const SCXcodeMinimapShouldHighlightCommentsKey  = @"SCXcodeMinimapShouldHighlightCommentsKey";
+
+NSString *const SCXcodeMinimapHighlightPreprocessorChangeNotification = @"SCXcodeMinimapHighlightPreprocessorChangeNotification";
+NSString *const SCXcodeMinimapShouldHighlightPreprocessorKey  = @"SCXcodeMinimapShouldHighlightPreprocessorKey";
+
+NSString *const SCXcodeMinimapHighlightEditorChangeNotification = @"SCXcodeMinimapHighlightEditorChangeNotification";
+NSString *const SCXcodeMinimapShouldHighlightEditorKey = @"SCXcodeMinimapShouldHighlightEditorKey";
+
+NSString *const SCXcodeMinimapHideEditorScrollerChangeNotification = @"SCXcodeMinimapHideEditorScrollerChangeNotification";
+NSString *const SCXcodeMinimapShouldHideEditorScrollerKey  = @"SCXcodeMinimapShouldHideEditorScrollerKey";
+
+NSString *const SCXcodeMinimapThemeChangeNotification = @"SCXcodeMinimapThemeChangeNotification";
+NSString *const SCXcodeMinimapThemeKey  = @"SCXcodeMinimapThemeKey";
+
+NSString *const kViewMenuItemTitle = @"View";
+
+NSString *const kMinimapMenuItemTitle = @"Minimap";
+NSString *const kShowMinimapMenuItemTitle = @"Show Minimap";
+NSString *const kHideMinimapMenuItemTitle = @"Hide Minimap";
+
+NSString *const kHighlightBreakpointsMenuItemTitle = @"Highlight breakpoints";
+NSString *const kHighlightCommentsMenuItemTitle = @"Highlight comments";
+NSString *const kHighlightPreprocessorMenuItemTitle = @"Highlight preprocessor";
+NSString *const kHighlightEditorMenuItemTitle = @"Highlight main editor";
+NSString *const kHideEditorScrollerMenuItemTitle = @"Hide editor scroller";
+
+NSString *const kThemeMenuItemTitle = @"Theme";
+NSString *const kEditorThemeMenuItemTitle = @"Editor Theme";
 
 @implementation SCXcodeMinimap
 
-static SCXcodeMinimap *sharedMinimap = nil;
-+ (void)pluginDidLoad:(NSBundle *)plugin {
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        sharedMinimap = [[self alloc] init];
-    });
++ (void)pluginDidLoad:(NSBundle *)plugin
+{
+	static SCXcodeMinimap *sharedMinimap = nil;
+	static dispatch_once_t onceToken;
+	dispatch_once(&onceToken, ^{
+		sharedMinimap = [[self alloc] init];
+	});
 }
 
-- (id)init {
-    if (self = [super init]) {
-        
-        [self createMenuItem];
-        
-        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onDidFinishSetup:) name:IDESourceCodeEditorDidFinishSetupNotification object:nil];
-        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onDocumentDidChange:) name:IDEEditorDocumentDidChangeNotification object:nil];
-        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onCodeEditorBoundsChange:) name:IDESourceCodeEditorTextViewBoundsDidChangeNotification object:nil];
-    }
-    return self;
+- (id)init
+{
+	if (self = [super init]) {
+		
+		[self registerUserDefaults];
+		[self createMenuItem];
+		
+		[[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onDidFinishSetup:) name:IDESourceCodeEditorDidFinishSetupNotification object:nil];
+	}
+	return self;
 }
+
+- (void)registerUserDefaults
+{
+	NSDictionary *userDefaults = @{SCXcodeMinimapZoomLevelKey                   : @(0.1f),
+								   SCXcodeMinimapShouldDisplayKey               : @(YES),
+								   SCXcodeMinimapShouldHighlightBreakpointsKey  : @(YES),
+								   SCXcodeMinimapShouldHighlightCommentsKey     : @(YES),
+								   SCXcodeMinimapShouldHighlightPreprocessorKey : @(YES)};
+	
+	[[NSUserDefaults standardUserDefaults] registerDefaults:userDefaults];
+}
+
+#pragma mark - Menu Items and Actions
 
 - (void)createMenuItem
 {
-    NSMenuItem *editMenuItem = [[NSApp mainMenu] itemWithTitle:@"View"];
-    
-    if(editMenuItem == nil) {
-        return;
-    }
-    
-    NSMenuItem *miniMapItem = [[NSMenuItem alloc] initWithTitle:@""
-                                                         action:NULL
-                                                  keyEquivalent:@"M"];
-    [miniMapItem setKeyEquivalentModifierMask:NSControlKeyMask | NSShiftKeyMask];
-    
-    miniMapItem.target = self;
-    
-    [editMenuItem.submenu insertItem:[NSMenuItem separatorItem]
-                             atIndex:[editMenuItem.submenu numberOfItems]];
-    [editMenuItem.submenu insertItem:miniMapItem
-                             atIndex:[editMenuItem.submenu numberOfItems]];
-    
-    if ([[NSUserDefaults standardUserDefaults] boolForKey:SCXodeMinimapIsInitiallyHidden]) {
-        [self hideMiniMap:miniMapItem];
-    }
-    else {
-        [self showMiniMap:miniMapItem];
-    }
+	NSMenuItem *editMenuItem = [[NSApp mainMenu] itemWithTitle:kViewMenuItemTitle];
+	
+	if(editMenuItem == nil) {
+		return;
+	}
+	
+	[editMenuItem.submenu addItem:[NSMenuItem separatorItem]];
+	
+	NSMenuItem *minimapMenuItem = [[NSMenuItem alloc] initWithTitle:kMinimapMenuItemTitle action:nil keyEquivalent:@""];
+	[editMenuItem.submenu addItem:minimapMenuItem];
+	
+	NSMenu *minimapMenu = [[NSMenu alloc] init];
+	{
+		NSMenuItem *showHideMinimapItem = [[NSMenuItem alloc] initWithTitle:@"" action:@selector(toggleMinimap:) keyEquivalent:@"M"];
+		[showHideMinimapItem setKeyEquivalentModifierMask:NSControlKeyMask | NSShiftKeyMask];
+		[showHideMinimapItem setTarget:self];
+		[minimapMenu addItem:showHideMinimapItem];
+		
+		[minimapMenu addItem:[NSMenuItem separatorItem]];
+		
+		NSView *sizeView = [[NSView alloc] initWithFrame:CGRectMake(0.0f, 0.0f, 200.0f, 20.0f)];
+		[sizeView setAutoresizingMask:NSViewMinXMargin | NSViewMaxXMargin | NSViewMinYMargin | NSViewMaxYMargin];
+		
+		NSTextField *sizeViewTitleLabel = [[NSTextField alloc] initWithFrame:NSMakeRect(18.0f, 0.0f, 50.0f, 20.0f)];
+		[sizeViewTitleLabel setStringValue:@"Size"];
+		[sizeViewTitleLabel setFont:[NSFont systemFontOfSize:14]];
+		[sizeViewTitleLabel setBezeled:NO];
+		[sizeViewTitleLabel setDrawsBackground:NO];
+		[sizeViewTitleLabel setEditable:NO];
+		[sizeViewTitleLabel setSelectable:NO];
+		[sizeView addSubview:sizeViewTitleLabel];
+		
+		NSSlider *sizeSlider = [[NSSlider alloc] initWithFrame:CGRectMake(60.0f, 0.0f, 136.0f, 20.0f)];
+		[sizeSlider setMaxValue:0.35f];
+		[sizeSlider setMinValue:0.05f];
+		[sizeSlider setTarget:self];
+		[sizeSlider setAction:@selector(onSizeSliderValueChanged:)];
+		[sizeSlider setDoubleValue:[[[NSUserDefaults standardUserDefaults] objectForKey:SCXcodeMinimapZoomLevelKey] doubleValue]];
+		[sizeView addSubview:sizeSlider];
+		
+		NSMenuItem *minimapSizeItem = [[NSMenuItem alloc] init];
+		[minimapSizeItem setView:sizeView];
+		[minimapMenu addItem:minimapSizeItem];
+		
+		BOOL shouldDisplayMinimap = [[[NSUserDefaults standardUserDefaults] objectForKey:SCXcodeMinimapShouldDisplayKey] boolValue];
+		[showHideMinimapItem setTitle:(shouldDisplayMinimap ? kHideMinimapMenuItemTitle : kShowMinimapMenuItemTitle)];
+		
+		[minimapMenu addItem:[NSMenuItem separatorItem]];
+	}
+	
+	{
+		NSMenuItem *highlightBreakpointsMenuItem = [[NSMenuItem alloc] initWithTitle:kHighlightBreakpointsMenuItemTitle
+																			  action:@selector(toggleBreakpointHighlighting:) keyEquivalent:@""];
+		[highlightBreakpointsMenuItem setTarget:self];
+		[minimapMenu addItem:highlightBreakpointsMenuItem];
+		
+		BOOL breakpointHighlightingEnabled = [[[NSUserDefaults standardUserDefaults] objectForKey:SCXcodeMinimapShouldHighlightBreakpointsKey] boolValue];
+		[highlightBreakpointsMenuItem setState:(breakpointHighlightingEnabled ? NSOnState : NSOffState)];
+		
+		
+		NSMenuItem *highlightCommentsMenuItem = [[NSMenuItem alloc] initWithTitle:kHighlightCommentsMenuItemTitle
+																		   action:@selector(toggleCommentsHighlighting:) keyEquivalent:@""];
+		[highlightCommentsMenuItem setTarget:self];
+		[minimapMenu addItem:highlightCommentsMenuItem];
+		
+		BOOL commentsHighlightingEnabled = [[[NSUserDefaults standardUserDefaults] objectForKey:SCXcodeMinimapShouldHighlightCommentsKey] boolValue];
+		[highlightCommentsMenuItem setState:(commentsHighlightingEnabled ? NSOnState : NSOffState)];
+		
+		
+		NSMenuItem *highlightPreprocessorMenuItem = [[NSMenuItem alloc] initWithTitle:kHighlightPreprocessorMenuItemTitle
+																			   action:@selector(togglePreprocessorHighlighting:) keyEquivalent:@""];
+		[highlightPreprocessorMenuItem setTarget:self];
+		[minimapMenu addItem:highlightPreprocessorMenuItem];
+		
+		BOOL preprocessorHighlightingEnabled = [[[NSUserDefaults standardUserDefaults] objectForKey:SCXcodeMinimapShouldHighlightPreprocessorKey] boolValue];
+		[highlightPreprocessorMenuItem setState:(preprocessorHighlightingEnabled ? NSOnState : NSOffState)];
+		
+		
+		NSMenuItem *highlightEditorMenuItem = [[NSMenuItem alloc] initWithTitle:kHighlightEditorMenuItemTitle
+																		 action:@selector(toggleEditorHighlighting:) keyEquivalent:@""];
+		[highlightEditorMenuItem setTarget:self];
+		[minimapMenu addItem:highlightEditorMenuItem];
+		
+		BOOL editorHighlightingEnabled = [[[NSUserDefaults standardUserDefaults] objectForKey:SCXcodeMinimapShouldHighlightEditorKey] boolValue];
+		[highlightEditorMenuItem setState:(editorHighlightingEnabled ? NSOnState : NSOffState)];
+		
+		
+		NSMenuItem *hideEditorScrollerMenuItem = [[NSMenuItem alloc] initWithTitle:kHideEditorScrollerMenuItemTitle
+																			action:@selector(toggleEditorScrollerHiding:) keyEquivalent:@""];
+		[hideEditorScrollerMenuItem setTarget:self];
+		[minimapMenu addItem:hideEditorScrollerMenuItem];
+		
+		BOOL shouldHideEditorScroller = [[[NSUserDefaults standardUserDefaults] objectForKey:SCXcodeMinimapShouldHideEditorScrollerKey] boolValue];
+		[hideEditorScrollerMenuItem setState:(shouldHideEditorScroller ? NSOnState : NSOffState)];
+		
+		
+		[minimapMenu addItem:[NSMenuItem separatorItem]];
+	}
+	
+	{
+		NSMenuItem *themesMenuItem = [[NSMenuItem alloc] initWithTitle:kThemeMenuItemTitle action:nil keyEquivalent:@""];
+		[minimapMenu addItem:themesMenuItem];
+		
+		NSMenu *themesMenu = [[NSMenu alloc] init];
+		{
+			NSString *currentThemeName = [[NSUserDefaults standardUserDefaults] objectForKey:SCXcodeMinimapThemeKey];
+			
+			NSMenuItem *editorThemeMenuItem = [[NSMenuItem alloc] initWithTitle:kEditorThemeMenuItemTitle action:@selector(setMinimapTheme:) keyEquivalent:@""];
+			[editorThemeMenuItem setTarget:self];
+			[themesMenu addItem:editorThemeMenuItem];
+			
+			if(currentThemeName == nil) {
+				[editorThemeMenuItem setState:NSOnState];
+			}
+			
+			[themesMenu addItem:[NSMenuItem separatorItem]];
+			
+			NSArray *themes = [[DVTFontAndColorTheme preferenceSetsManager] availablePreferenceSets];
+			NSArray *builtInThemes = [themes filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"SELF.isBuiltIn == YES"]];
+			NSArray *userThemes = [themes filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"SELF.isBuiltIn == NO"]];
+			
+			for(DVTFontAndColorTheme *theme in builtInThemes) {
+				NSMenuItem *themeMenuItem = [[NSMenuItem alloc] initWithTitle:theme.localizedName action:@selector(setMinimapTheme:) keyEquivalent:@""];
+				[themeMenuItem setTarget:self];
+				[themesMenu addItem:themeMenuItem];
+				
+				if([theme.localizedName isEqualToString:currentThemeName]) {
+					[themeMenuItem setState:NSOnState];
+				}
+			}
+			
+			[themesMenu addItem:[NSMenuItem separatorItem]];
+			
+			for(DVTFontAndColorTheme *theme in userThemes) {
+				NSMenuItem *themeMenuItem = [[NSMenuItem alloc] initWithTitle:theme.localizedName action:@selector(setMinimapTheme:) keyEquivalent:@""];
+				[themeMenuItem setTarget:self];
+				[themesMenu addItem:themeMenuItem];
+				
+				if([theme.localizedName isEqualToString:currentThemeName]) {
+					[themeMenuItem setState:NSOnState];
+				}
+			}
+		}
+		[themesMenuItem setSubmenu:themesMenu];
+		
+	}
+	[minimapMenuItem setSubmenu:minimapMenu];
 }
 
-- (void)hideMiniMap:(NSMenuItem *)sender
+- (void)toggleMinimap:(NSMenuItem *)sender
 {
-    [[NSUserDefaults standardUserDefaults] setBool:YES forKey:SCXodeMinimapIsInitiallyHidden];
-    
-    [sender setTitle:@"Show MiniMap"];
-    [sender setAction:@selector(showMiniMap:)];
-    
-    [[NSNotificationCenter defaultCenter] postNotificationName:SCXodeMinimapWantsToBeHiddenNotification object:nil];
+	BOOL shouldDisplayMinimap = [[[NSUserDefaults standardUserDefaults] objectForKey:SCXcodeMinimapShouldDisplayKey] boolValue];
+	
+	[sender setTitle:(!shouldDisplayMinimap ? kHideMinimapMenuItemTitle : kShowMinimapMenuItemTitle)];
+	[[NSUserDefaults standardUserDefaults] setObject:@(!shouldDisplayMinimap) forKey:SCXcodeMinimapShouldDisplayKey];
+	[[NSNotificationCenter defaultCenter] postNotificationName:SCXcodeMinimapShouldDisplayChangeNotification object:nil];
 }
 
-- (void)showMiniMap:(NSMenuItem *)sender
+- (void)toggleBreakpointHighlighting:(NSMenuItem *)sender
 {
-    [[NSUserDefaults standardUserDefaults] setBool:NO forKey:SCXodeMinimapIsInitiallyHidden];
-    
-    [sender setTitle:@"Hide MiniMap"];
-    [sender setAction:@selector(hideMiniMap:)];
-    
-    [[NSNotificationCenter defaultCenter] postNotificationName:SCXodeMinimapWantsToBeShownNotification object:nil];
+	BOOL breakpointHighlightingEnabled = [[[NSUserDefaults standardUserDefaults] objectForKey:SCXcodeMinimapShouldHighlightBreakpointsKey] boolValue];
+	
+	[sender setState:(breakpointHighlightingEnabled ? NSOffState : NSOnState)];
+	[[NSUserDefaults standardUserDefaults] setObject:@(!breakpointHighlightingEnabled) forKey:SCXcodeMinimapShouldHighlightBreakpointsKey];
+	[[NSNotificationCenter defaultCenter] postNotificationName:SCXcodeMinimapHighlightBreakpointsChangeNotification object:nil];
 }
 
-- (void)onDocumentDidChange:(NSNotification*)sender
+- (void)toggleCommentsHighlighting:(NSMenuItem *)sender
 {
-    SCMiniMapView *miniMapView = objc_getAssociatedObject([sender object], &kKeyMiniMapView);
-    
-    //150 lines per multiplier means a 1500 line file should have a delay of 2.5 seconds. 
-    CGFloat multiplier = ceilf((CGFloat)miniMapView.numberOfLines / 150.0f);
-    NSTimeInterval updateInterval = (CGFloat)multiplier * kDefaultUpdateInterval;
-    
-    [NSObject cancelPreviousPerformRequestsWithTarget:miniMapView selector:@selector(updateTextView) object:nil];
-    [miniMapView performSelector:@selector(updateTextView) withObject:nil afterDelay:updateInterval];
+	BOOL commentsHighlightingEnabled = [[[NSUserDefaults standardUserDefaults] objectForKey:SCXcodeMinimapShouldHighlightCommentsKey] boolValue];
+	
+	[sender setState:(commentsHighlightingEnabled ? NSOffState : NSOnState)];
+	[[NSUserDefaults standardUserDefaults] setObject:@(!commentsHighlightingEnabled) forKey:SCXcodeMinimapShouldHighlightCommentsKey];
+	[[NSNotificationCenter defaultCenter] postNotificationName:SCXcodeMinimapHighlightCommentsChangeNotification object:nil];
 }
 
-- (void)onCodeEditorBoundsChange:(NSNotification*)sender
+- (void)togglePreprocessorHighlighting:(NSMenuItem *)sender
 {
-    if(![sender.object respondsToSelector:@selector(scrollView)]) {
-        NSLog(@"Could not fetch scroll view");
-        return;
-    }
-    NSScrollView *editorScrollView = [sender.object performSelector:@selector(scrollView)];
-    SCMiniMapView *miniMapView = objc_getAssociatedObject(editorScrollView, &kKeyMiniMapView);
-    [miniMapView updateSelectionView];
+	BOOL preprocessorHighlightingEnabled = [[[NSUserDefaults standardUserDefaults] objectForKey:SCXcodeMinimapShouldHighlightPreprocessorKey] boolValue];
+	
+	[sender setState:(preprocessorHighlightingEnabled ? NSOffState : NSOnState)];
+	[[NSUserDefaults standardUserDefaults] setObject:@(!preprocessorHighlightingEnabled) forKey:SCXcodeMinimapShouldHighlightPreprocessorKey];
+	[[NSNotificationCenter defaultCenter] postNotificationName:SCXcodeMinimapHighlightPreprocessorChangeNotification object:nil];
 }
+
+- (void)toggleEditorHighlighting:(NSMenuItem *)sender
+{
+	BOOL editorHighlightingEnabled = [[[NSUserDefaults standardUserDefaults] objectForKey:SCXcodeMinimapShouldHighlightEditorKey] boolValue];
+	
+	[sender setState:(editorHighlightingEnabled ? NSOffState : NSOnState)];
+	[[NSUserDefaults standardUserDefaults] setObject:@(!editorHighlightingEnabled) forKey:SCXcodeMinimapShouldHighlightEditorKey];
+	[[NSNotificationCenter defaultCenter] postNotificationName:SCXcodeMinimapHighlightEditorChangeNotification object:nil];
+}
+
+- (void)toggleEditorScrollerHiding:(NSMenuItem *)sender
+{
+	BOOL shouldHideEditorScroller = [[[NSUserDefaults standardUserDefaults] objectForKey:SCXcodeMinimapShouldHideEditorScrollerKey] boolValue];
+	
+	[sender setState:(shouldHideEditorScroller ? NSOffState : NSOnState)];
+	[[NSUserDefaults standardUserDefaults] setObject:@(!shouldHideEditorScroller) forKey:SCXcodeMinimapShouldHideEditorScrollerKey];
+	[[NSNotificationCenter defaultCenter] postNotificationName:SCXcodeMinimapHideEditorScrollerChangeNotification object:nil];
+}
+
+- (void)setMinimapTheme:(NSMenuItem *)sender
+{
+	NSString *currentThemeName = [[NSUserDefaults standardUserDefaults] objectForKey:SCXcodeMinimapThemeKey];
+	
+	if(currentThemeName == sender.title || [currentThemeName isEqualToString:sender.title]) {
+		return;
+	}
+	
+	NSMenu *themesSubmenu = [[[[NSApp mainMenu] itemWithTitle:kViewMenuItemTitle].submenu itemWithTitle:kMinimapMenuItemTitle].submenu itemWithTitle:kThemeMenuItemTitle].submenu;
+	for(NSMenuItem *item in themesSubmenu.itemArray) {
+		[item setState:NSOffState];
+	}
+	
+	[sender setState:NSOnState];
+	
+	if([sender.menu indexOfItem:sender] == 0) {
+		[[NSUserDefaults standardUserDefaults] removeObjectForKey:SCXcodeMinimapThemeKey];
+	} else {
+		[[NSUserDefaults standardUserDefaults] setObject:sender.title forKey:SCXcodeMinimapThemeKey];
+	}
+	
+	[[NSNotificationCenter defaultCenter] postNotificationName:SCXcodeMinimapThemeChangeNotification object:nil];
+}
+
+- (void)onSizeSliderValueChanged:(NSSlider *)sender
+{
+	NSEvent *event = [[NSApplication sharedApplication] currentEvent];
+	if(event.type != NSLeftMouseUp) {
+		return;
+	}
+	
+	[[NSUserDefaults standardUserDefaults] setObject:@(sender.doubleValue) forKey:SCXcodeMinimapZoomLevelKey];
+	[[NSNotificationCenter defaultCenter] postNotificationName:SCXcodeMinimapZoomLevelChangeNotification object:nil];
+}
+
+#pragma mark - Xcode Notification
 
 - (void)onDidFinishSetup:(NSNotification*)sender
 {
-    if(![[sender object] respondsToSelector:@selector(containerView)]) {
-        NSLog(@"Could not fetch editor container view");
-        return;
-    }
-    if(![[sender object] respondsToSelector:@selector(scrollView)]) {
-        NSLog(@"Could not fetch editor scroll view");
-        return;
-    }
-    if(![[sender object] respondsToSelector:@selector(textView)]) {
-        NSLog(@"Could not fetch editor text view");
-        return;
-    }
-    if(![[sender object] respondsToSelector:@selector(sourceCodeDocument)]) {
-        NSLog(@"Could not fetch editor document");
-        return;
-    }
-    
-    /* Get Editor Components */
-    NSDocument *editorDocument      = [[sender object] performSelector:@selector(sourceCodeDocument)];
-    NSView *editorContainerView     = [[sender object] performSelector:@selector(containerView)];
-    NSScrollView *editorScrollView  = [[sender object] performSelector:@selector(scrollView)];
-    NSTextView *editorTextView      = [[sender object] performSelector:@selector(textView)];
-    
-    [editorTextView setAutoresizingMask:NSViewMinXMargin | NSViewMaxXMargin | NSViewWidthSizable | NSViewHeightSizable];
-    
-    /* Create Mini Map */
-    CGFloat width = editorTextView.bounds.size.width * kDefaultZoomLevel;
-    
-    NSRect miniMapScrollViewFrame = NSMakeRect(editorContainerView.bounds.size.width - width,
-                                               0,
-                                               width,
-                                               editorScrollView.bounds.size.height);
-    
-    SCMiniMapView *miniMapView = [[SCMiniMapView alloc] initWithFrame:miniMapScrollViewFrame];
-    miniMapView.editorScrollView = editorScrollView;
-    miniMapView.editorTextView = editorTextView;
-    [editorContainerView addSubview:miniMapView];
-    
-    /* Setup Associated Objects */
-    objc_setAssociatedObject(editorScrollView,  &kKeyMiniMapView, miniMapView, OBJC_ASSOCIATION_ASSIGN);
-    objc_setAssociatedObject(editorDocument,    &kKeyMiniMapView, miniMapView, OBJC_ASSOCIATION_RETAIN);
-    
-    if ([[NSUserDefaults standardUserDefaults] boolForKey:SCXodeMinimapIsInitiallyHidden]) {
-        [miniMapView hide];
-    }
-    else {
-        [miniMapView show];
-    }
+	if(![sender.object isKindOfClass:[IDESourceCodeEditor class]]) {
+		NSLog(@"Could not fetch source code editor container");
+		return;
+	}
+	
+	IDESourceCodeEditor *editor = (IDESourceCodeEditor *)[sender object];
+	[editor.textView setAutoresizingMask:NSViewMaxXMargin | NSViewMaxYMargin | NSViewWidthSizable | NSViewHeightSizable];
+	[editor.scrollView setAutoresizingMask:NSViewMaxXMargin | NSViewMaxYMargin | NSViewWidthSizable | NSViewHeightSizable];
+	[editor.containerView setAutoresizingMask:NSViewMaxXMargin | NSViewMaxYMargin | NSViewWidthSizable | NSViewHeightSizable];
+	
+	SCXcodeMinimapView *minimapView = [[SCXcodeMinimapView alloc] initWithEditor:editor];
+	[editor.containerView addSubview:minimapView];
 }
 
 @end
